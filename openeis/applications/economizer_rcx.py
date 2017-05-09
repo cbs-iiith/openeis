@@ -50,7 +50,7 @@ under Contract DE-AC05-76RL01830
 '''
 import datetime
 import logging
-import re
+import dateutil.tz
 from openeis.applications.utils import conversion_utils as cu
 from openeis.applications import (DrivenApplicationBaseClass,
                                   OutputDescriptor,
@@ -65,7 +65,7 @@ ECON2 = 'Economizing When Unit Should Dx'
 ECON3 = 'Economizing When Unit Should Not Dx'
 ECON4 = 'Excess Outdoor-air Intake Dx'
 ECON5 = 'Insufficient Outdoor-air Intake Dx'
-
+available_tz = {1: 'US/Pacific', 2: 'US/Mountain', 3: 'US/Central', 4: 'US/Eastern'}
 
 class Application(DrivenApplicationBaseClass):
     '''Application to detect and correct operational problems for AHUs/RTUs.
@@ -94,7 +94,7 @@ class Application(DrivenApplicationBaseClass):
                  economizer_type='DDB', econ_hl_temp=65.0,
                  device_type='AHU', temp_deadband=1.0,
                  data_window=1, no_required_data=20,
-                 open_damper_time=5,
+                 open_damper_time=5, local_tz=1,
                  low_supply_fan_threshold=20.0,
                  mat_low_threshold=50.0, mat_high_threshold=90.0,
                  oat_low_threshold=30.0, oat_high_threshold=100.0,
@@ -108,10 +108,16 @@ class Application(DrivenApplicationBaseClass):
                  ventilation_oaf_threshold=5.0,
                  insufficient_damper_threshold=15.0,
                  temp_damper_threshold=90.0, rated_cfm=1000.0, eer=10.0,
+                 sensitivity=1,
                  **kwargs):
         # initialize user configurable parameters.
         super().__init__(*args, **kwargs)
         self.default_building_name_used = False
+
+        try:
+            self.cur_tz = available_tz[local_tz]
+        except:
+            self.cur_tz = 'UTC'
 
         if building_name is None:
             building_name = "None supplied"
@@ -140,6 +146,38 @@ class Application(DrivenApplicationBaseClass):
         self.cooling_enabled_threshold = float(cooling_enabled_threshold)
         cfm = float(rated_cfm)
         eer = float(eer)
+
+        if sensitivity == 0:
+            # low sensitivity
+            temp_difference_threshold = 6
+            open_damper_threshold = 60
+            oaf_economizing_threshold = 30
+            excess_damper_threshold = 40
+            excess_oaf_threshold = 50
+            insufficient_damper_threshold = 20
+            ventilation_oaf_threshold = 30
+            oat_mat_check = float(oat_mat_check) * 1.5
+        elif sensitivity == 1:
+            # Normal sensitivity
+            temp_difference_threshold = 4
+            open_damper_threshold = 40
+            oaf_economizing_threshold = 50
+            excess_damper_threshold = 20
+            excess_oaf_threshold = 30
+            insufficient_damper_threshold = 10
+            ventilation_oaf_threshold = 20
+            oat_mat_check = float(oat_mat_check)
+        elif sensitivity == 2:
+            # high sensitivity
+            temp_difference_threshold = 2
+            open_damper_threshold = 20
+            oaf_economizing_threshold = 70
+            excess_damper_threshold = 10
+            excess_oaf_threshold = 20
+            insufficient_damper_threshold = 0
+            ventilation_oaf_threshold = 10
+            oat_mat_check = float(oat_mat_check) * 0.5
+
         # Pre-requisite messages
         self.pre_msg1 = ('Supply fan is off, current data will '
                          'not be used for diagnostics.')
@@ -339,6 +377,16 @@ class Application(DrivenApplicationBaseClass):
             ConfigDescriptor(float,
                              'AHU/RTU rated EER',
                              value_default=10.0),
+            'sensitivity':
+            ConfigDescriptor(int,
+                             'Sensitivity: values can be 0 (low), '
+                             '1 (normal), 2 (high), 3 (custom). Setting sensitivity to 3 (custom) '
+                             'allows you to enter your own values for all threshold values',
+                             value_default=1),
+            'local_tz':
+            ConfigDescriptor(int,
+                             "Integer corresponding to local timezone: [1: 'US/Pacific', 2: 'US/Mountain', 3: 'US/Central', 4: 'US/Eastern']",
+                             value_default=1)
             }
 
     @classmethod
@@ -353,7 +401,7 @@ class Application(DrivenApplicationBaseClass):
         return {
             cls.fan_status_name:
             InputDescriptor('SupplyFanStatus',
-                            'AHU Supply Fan Status', count_min=0),
+                            'AHU Supply Fan Status (required for Dx)', count_min=0),
             cls.fan_speedcmd_name:
             InputDescriptor('SupplyFanSpeed',
                             'AHU supply fan speed', count_min=0),
@@ -369,24 +417,18 @@ class Application(DrivenApplicationBaseClass):
             InputDescriptor('ReturnAirTemperature',
                             'AHU return-air temperature', count_min=1),
             cls.damper_signal_name:
-            InputDescriptor('OutdoorDamperSignal', 'AHU outdoor-air damper '
-                            'signal', count_min=0),
+            InputDescriptor('OutdoorDamperSignal',
+                            'AHU outdoor-air damper signal (required for Dx)', count_min=0),
             cls.cool_call_name:
-            InputDescriptor('CoolingCall',
-                            'AHU cooling coil command or RTU coolcall or '
-                            'compressor command', count_min=0),
-
-
+            InputDescriptor('CoolingCall/ChilledWaterValvePosition',
+                            'AHU cooling coil valve command or RTU coolcall/'
+                            'compressor command.', count_min=0),
             cls.da_temp_name:
             InputDescriptor('DischargeAirTemperature',
                             'AHU discharge-air temperature', count_min=0),
             cls.da_temp_setpoint_name:
             InputDescriptor('DischargeAirTemperatureSetPoint',
-                            'AHU discharge-air temperature setpoint', count_min=0),
-            cls.cc_valve_name:
-            InputDescriptor('CoolingCoilValvePosition',
-                            'AHU cooling coil valve position',
-                            count_min=0)
+                            'AHU discharge-air temperature setpoint', count_min=0)
 
         }
 
@@ -433,7 +475,7 @@ class Application(DrivenApplicationBaseClass):
         fsp_topic = '/'.join(output_topic_base+['Economizer_RCx', cls.fan_speedcmd_name])
         fst_topic = '/'.join(output_topic_base+['Economizer_RCx', cls.fan_status_name])
         od_topic = '/'.join(output_topic_base+['Economizer_RCx', cls.damper_signal_name])
-        ccv_topic = '/'.join(output_topic_base+['Economizer_RCx', cls.cc_valve_name])
+        ccv_topic = '/'.join(output_topic_base+['Economizer_RCx', cls.cool_call_name])
         oaf_topic = '/'.join(output_topic_base+['Economizer_RCx', cls.oaf_name])
         output_needs = {
             'Economizer_RCx': {
@@ -490,11 +532,8 @@ class Application(DrivenApplicationBaseClass):
         # }
         # diagnostic_result.insert_table_row('Economizer_RCx', ecam_data)
         # return diagnostic_result
-
-        topics = self.inp.get_topics()
-        diagnostic_topic = topics[self.oa_temp_name][0]
-        current_time = self.inp.localize_sensor_time(diagnostic_topic,
-                                                     current_time)
+        to_zone = dateutil.tz.gettz(self.cur_tz)
+        current_time = current_time.astimezone(to_zone)
         base_topic = self.inp.get_topics()
         meta_topics = self.inp.get_topics_meta()
         unit_dict = {
@@ -509,7 +548,9 @@ class Application(DrivenApplicationBaseClass):
                 meta_topics[self.da_temp_setpoint_name][base_topic[self.da_temp_setpoint_name][0]]['unit']
 
         for key, value in points.items():
-            device_dict[key.lower()] = value
+            point_device = [_name.lower() for _name in key.split('&&&')]
+            if point_device[0] not in device_dict:
+                device_dict[point_device[0]] = value
 
         damper_data = []
         oatemp_data = []
@@ -547,7 +588,7 @@ class Application(DrivenApplicationBaseClass):
             elif (key.startswith(self.da_temp_name) #DAT
                   and value is not None):
                 datemp_data.append(value)
-            elif (key.startswith(self.cc_valve_name) #CoolCoilValvePos
+            elif (key.startswith(self.cool_call_name) #CoolCoilValvePos
                   and value is not None):
                 ccv_data.append(value)
             elif (key.startswith(self.fan_status_name) #Fan status

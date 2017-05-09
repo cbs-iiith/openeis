@@ -58,6 +58,8 @@ import sys
 import os
 
 install_requires = [
+        # This will be installed after the bootstrap. 'ephem',
+        # This will be installed after the bootstrap. 'workalendar',
         'python-dateutil',
         'django>=1.6,<1.7',
         'django-filter>=0.8,<0.9',
@@ -79,12 +81,12 @@ basepath = os.path.dirname(os.path.abspath(__file__))
 
 def get_files(path):
     '''Recursivly walks a directory returning list of files'''
-    
+
     file_names = []
     abspath = os.path.abspath(path)
     origpath = os.getcwd()
     os.chdir(path)
-    
+
     # the walk needs to be relatative to the currently changed
     # directory. So that it is put into the package correctly.
     for root, dirs, files in os.walk('.', topdown=False):
@@ -92,15 +94,16 @@ def get_files(path):
             if '__pycache__' not in root:
                 file_names.append(os.path.join(root, name)) #(os.path.join(root, name)))
     os.chdir(origpath)
-    
+
     return file_names
 
 if sys.platform != 'win32':
     install_requires.append('numpy')
+    install_requires.append('scipy')
 
 setup(
     name = 'openeis',
-    version = '0.1',
+    version = '2.5',
     description = 'Open Energy Information System (OpenEIS) server.',
     author = 'Bora Akyol',
     author_email = 'bora@pnnl.gov',
